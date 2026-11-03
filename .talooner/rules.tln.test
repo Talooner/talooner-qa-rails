@@ -1,0 +1,387 @@
+// Test suite for talooner-qa's policy.
+//
+//   talooner rules test .talooner/
+//
+// Same command the CI `rules` job runs on every push (the pinned runner image,
+// entrypoint `tln test .talooner/`). One matching and one non-matching record
+// per rule, boundaries on every threshold, the unset-fact cases pinned, and a
+// mocked decision model so no test spends a token.
+
+// ─── No description ──────────────────────────────────────────────────────────
+
+test "PR with no description is blocked, draft and described PRs are not" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 1
+    attr 1 "pr.draft" false
+    attr 1 "pr.has_description" false
+
+    // A draft is work in progress; nobody is asking for review yet.
+    record 2 type "pr"
+    attr 2 "pr.number" 2
+    attr 2 "pr.draft" true
+    attr 2 "pr.has_description" false
+
+    record 3 type "pr"
+    attr 3 "pr.number" 3
+    attr 3 "pr.draft" false
+    attr 3 "pr.has_description" true
+  }
+
+  when rule "Block PRs with no description"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "no description"
+    did_not 2 block "pr.merge"
+    did_not 3 block "pr.merge"
+  }
+}
+
+// ─── Critical paths ──────────────────────────────────────────────────────────
+
+test "Every critical path blocks and says why" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 10
+    attr 1 "pr.changed_files" [".talooner/rules.tln"]
+
+    record 2 type "pr"
+    attr 2 "pr.number" 11
+    attr 2 "pr.changed_files" ["app/controllers/talooner_qa/hooks_controller.rb"]
+
+    record 3 type "pr"
+    attr 3 "pr.number" 12
+    attr 3 "pr.changed_files" ["lib/talooner_qa/seeds.rb", "lib/talooner_qa.rb"]
+
+    record 4 type "pr"
+    attr 4 "pr.number" 13
+    attr 4 "pr.changed_files" ["talooner-qa-rails.gemspec"]
+
+    record 5 type "pr"
+    attr 5 "pr.number" 14
+    attr 5 "pr.changed_files" [".github/workflows/release.yml"]
+
+    // Not critical: docs, specs, and a plain library change.
+    record 6 type "pr"
+    attr 6 "pr.number" 15
+    attr 6 "pr.changed_files" ["README.md", "spec/hooks_spec.rb", "lib/talooner_qa/pages.rb"]
+  }
+
+  when rule "Critical path needs a human review"
+
+  expect {
+    flagged 1
+    flagged 2
+    flagged 3
+    flagged 4
+    flagged 5
+    not flagged 6
+    count == 5
+    did 1 block "pr.merge"
+    did 2 block "pr.merge"
+    did 5 comment "pr" contains "human read"
+    did_not 6 block "pr.merge"
+  }
+}
+
+test "Path predicates are substring scans with trailing slashes, not globs" {
+  given {
+    // "app/controllers/talooner_qa_admin/" does not contain "app/controllers/talooner_qa/".
+    record 1 type "pr"
+    attr 1 "pr.changed_files" ["app/controllers/talooner_qa_admin/notes_controller.rb"]
+
+    // A sibling directory that merely starts with the same word.
+    record 2 type "pr"
+    attr 2 "pr.changed_files" [".talooner-bak/rules.tln"]
+
+    // Specs live in spec/, outside the areas they cover: a spec change
+    // alone is not critical (the code it tests is).
+    record 3 type "pr"
+    attr 3 "pr.changed_files" ["spec/hooks_spec.rb"]
+  }
+
+  when rule "Critical path needs a human review"
+
+  expect {
+    not flagged 1
+    not flagged 2
+    not flagged 3
+  }
+}
+
+test "Empty or unset changed_files matches no path predicate" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.changed_files" []
+
+    // Extraction failure: the fact is absent rather than empty. Pinned as a
+    // known limit (README: an unset fact reads as false) — the extractor
+    // aborts the run on a real error (talooner's internal/facts/pr.go returns,
+    // never returns partial facts), so this record only exists to keep the
+    // behaviour visible.
+    record 2 type "pr"
+    attr 2 "pr.number" 20
+  }
+
+  when rule "Critical path needs a human review"
+
+  expect {
+    not flagged 1
+    not flagged 2
+  }
+}
+
+// ─── Oversized PRs ───────────────────────────────────────────────────────────
+
+test "The 1500-line boundary is inclusive" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.lines_changed" 1500
+
+    record 2 type "pr"
+    attr 2 "pr.lines_changed" 1499
+
+    record 3 type "pr"
+    attr 3 "pr.lines_changed" 12000
+  }
+
+  when rule "Require human review for large PRs"
+
+  expect {
+    flagged 1
+    not flagged 2
+    flagged 3
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "1500 lines"
+    did_not 2 block "pr.merge"
+  }
+}
+
+test "An unset lines_changed does not block for size" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 30
+  }
+
+  when rule "Require human review for large PRs"
+
+  expect {
+    not flagged 1
+  }
+}
+
+// ─── Dependencies ────────────────────────────────────────────────────────────
+
+test "New dependencies pull in a security review; upgrades do not" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.number" 40
+    attr 1 "pr.new_dependencies" 3
+
+    // A version bump is not an addition. Boundary at zero.
+    record 2 type "pr"
+    attr 2 "pr.number" 41
+    attr 2 "pr.new_dependencies" 0
+    attr 2 "pr.upgraded_dependencies" 7
+
+    record 3 type "pr"
+    attr 3 "pr.number" 42
+    attr 3 "pr.new_dependencies" 1
+
+    // Unset: no manifest changed, or extraction did not run.
+    record 4 type "pr"
+    attr 4 "pr.number" 43
+  }
+
+  when rule "Security review for new dependencies"
+
+  expect {
+    flagged 1
+    not flagged 2
+    flagged 3
+    not flagged 4
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "3 new dependencies"
+    did_not 2 block "pr.merge"
+  }
+}
+
+// ─── Pending checks ──────────────────────────────────────────────────────────
+
+test "Pending checks leave a visible comment" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.checks_pending" true
+
+    record 2 type "pr"
+    attr 2 "pr.checks_pending" false
+
+    // The fact is omitted while GitHub is still computing it; absent must not
+    // read as pending-true here or every fresh PR gets a stale comment.
+    record 3 type "pr"
+    attr 3 "pr.number" 50
+  }
+
+  when rule "CI checks still running"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 comment "pr" contains "checks"
+  }
+}
+
+// ─── AI review must not fail silently ────────────────────────────────────────
+
+test "An inconclusive AI review asks for a human" {
+  given {
+    record 1 type "code_unit"
+    attr 1 "unit.name" "app/controllers/talooner_qa"
+    attr 1 "unit.llm_result" "unclear"
+
+    record 2 type "code_unit"
+    attr 2 "unit.name" "lib/talooner_qa"
+    attr 2 "unit.llm_result" "match"
+
+    record 3 type "code_unit"
+    attr 3 "unit.name" "spec"
+    attr 3 "unit.llm_result" "mismatch"
+  }
+
+  when rule "AI review was inconclusive"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "could not decide"
+  }
+}
+
+test "A failed AI review asks for a human" {
+  given {
+    record 1 type "code_unit"
+    attr 1 "unit.name" "app/controllers/talooner_qa"
+    attr 1 "unit.llm_result" "error"
+
+    record 2 type "code_unit"
+    attr 2 "unit.name" "lib/talooner_qa"
+    attr 2 "unit.llm_result" "match"
+
+    // No verdict at all: the review never ran for this unit.
+    record 3 type "code_unit"
+    attr 3 "unit.name" "config"
+  }
+
+  when rule "AI review failed"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "failed"
+  }
+}
+
+// ─── Decision model: risk ────────────────────────────────────────────────────
+
+test "A confident high risk blocks; an unsure or low one does not" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.risk" "high"
+    attr 1 "pr.risk_certainty" 0.85
+
+    record 2 type "pr"
+    attr 2 "pr.risk" "high"
+    attr 2 "pr.risk_certainty" 0.84
+
+    record 3 type "pr"
+    attr 3 "pr.risk" "low"
+    attr 3 "pr.risk_certainty" 0.95
+
+    // The enrich block never ran, so no opinion exists to act on.
+    record 4 type "pr"
+    attr 4 "pr.number" 60
+  }
+
+  when rule "Confident high risk needs a human review"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    not flagged 4
+    did 1 block "pr.merge"
+    did 1 comment "pr" contains "high risk"
+    did_not 2 block "pr.merge"
+  }
+}
+
+test "The risk decision calls the configured model once per PR" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.title" "Rewrite the verdict path"
+    attr 1 "pr.body" "Moves approval into decision.Writer"
+    attr 1 "pr.changed_files" ["app/controllers/talooner_qa/hooks_controller.rb"]
+  }
+
+  mock tool "cdm" "decide" { returns { chosen "high" certainty 0.9 } }
+
+  when enrich "cdm: how risky is this PR?"
+
+  expect {
+    count == 1
+    tool_called "cdm" "decide"
+  }
+}
+
+// ─── Decision model: description quality ─────────────────────────────────────
+
+test "A confident vague description gets a comment, never a block" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.description_kind" "vague"
+    attr 1 "pr.description_certainty" 0.85
+
+    record 2 type "pr"
+    attr 2 "pr.description_kind" "vague"
+    attr 2 "pr.description_certainty" 0.84
+
+    record 3 type "pr"
+    attr 3 "pr.description_kind" "explains why"
+    attr 3 "pr.description_certainty" 0.99
+  }
+
+  when rule "Confident vague description gets a comment"
+
+  expect {
+    flagged 1
+    not flagged 2
+    not flagged 3
+    did 1 comment "pr" contains "why"
+  }
+}
+
+test "The description decision calls the configured model once per PR" {
+  given {
+    record 1 type "pr"
+    attr 1 "pr.title" "Refactor"
+    attr 1 "pr.body" "Changes files"
+  }
+
+  mock tool "cdm" "decide" { returns { chosen "vague" certainty 0.9 } }
+
+  when enrich "cdm: does the description say why?"
+
+  expect {
+    count == 1
+    tool_called "cdm" "decide"
+  }
+}

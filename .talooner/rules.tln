@@ -1,0 +1,179 @@
+// talooner-qa-rails' review policy — copied from `talooner-qa/.talooner/rules.tln`
+// (itself `talooner`'s), with the critical paths mapped to this gem. Keep them
+// in step.
+//
+// Deliberately absent, and not by accident:
+//
+//   - No `strict` rule. The plugin always loads its own strict base ruleset
+//     (`talooner-plugin/internal/ruleset/base/talooner.tln`) into every tenant
+//     program: unresolved conflicts, pending checks, and a documented
+//     code-vs-doc mismatch are floors here already. Declaring one of those
+//     names again is a compile error, not extra safety.
+//   - No `do notify`: the verb has no executor.
+//   - No `do llm_review`: the review is the base ruleset's `tool "llm" "review"`
+//     enrich over each important `code_unit`, grounded in `.talooner/
+//     architecture.yaml` and the guide it points at. This file only reacts to
+//     the resulting `unit.llm_result`; with no `architecture.yaml` the cluster
+//     sends no units and rules 6-7 select nothing.
+//   - No auto-approve. One wrong unset fact approving a merge is a worse
+//     failure than a PR waiting for its author, and this repo's own bugs are
+//     the ones that decide other repos' merges.
+//   - No `do assign` / `do require`. There is no CODEOWNERS here, and a team
+//     review request made with `GITHUB_TOKEN` fails with a 422.
+//
+// `talooner rules validate .talooner/` and `talooner rules test .talooner/`
+// check changes before they reach a real PR. The CI `rules` job runs the same
+// test command on every push.
+
+// ─── Predicates ───────────────────────────────────────────────────────────────
+
+// The paths a PR must not change without a second pair of eyes: the policy
+// itself; the token guard (`/__qa/login` signs in as any role, so a hole in
+// `authenticate!` or `enabled?` is a backdoor into every app that mounts the
+// gem); the seed attributes filter (a secret that slips through lands in QA
+// logs); and what ships to rubygems.org: the gemspec and the release workflow.
+define "critical_path" {
+  attr "pr.changed_files" contains ".talooner/"
+    or attr "pr.changed_files" contains "app/controllers/talooner_qa/"
+    or attr "pr.changed_files" contains "lib/talooner_qa.rb"
+    or attr "pr.changed_files" contains "lib/talooner_qa/seeds.rb"
+    or attr "pr.changed_files" contains "talooner-qa-rails.gemspec"
+    or attr "pr.changed_files" contains ".github/workflows/release.yml"
+}
+
+// ─── Block incomplete PRs ─────────────────────────────────────────────────────
+
+rule "Block PRs with no description" {
+  for records where type == "pr"
+    and attr "pr.draft" == false
+    and attr "pr.has_description" == false
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "This PR has no description. Say what changed and why before requesting review"
+  reason "no description"
+  priority HIGH
+}
+
+// ─── Critical paths ──────────────────────────────────────────────────────────
+
+rule "Critical path needs a human review" {
+  for records where type == "pr"
+    and is "critical_path"
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "Changes the review policy, the token guard, the seed filter or what ships to rubygems.org. A human read is required before merge"
+  reason "touches a critical path"
+  priority HIGH
+}
+
+// ─── Oversized PRs ───────────────────────────────────────────────────────────
+
+rule "Require human review for large PRs" {
+  for records where type == "pr"
+    and attr "pr.lines_changed" >= 1500
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "{attr.pr.lines_changed} lines changed — too large to review with confidence. Consider splitting it"
+  reason "large change"
+  priority HIGH
+}
+
+// ─── Security review for new dependencies ────────────────────────────────────
+
+// The fact counts additions to `Gemfile`, not a gemspec's add_dependency:
+// a new runtime dependency there is caught by the gemspec being a critical
+// path. A version bump is not a new dependency.
+rule "Security review for new dependencies" {
+  for records where type == "pr"
+    and attr "pr.new_dependencies" > 0
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "{attr.pr.new_dependencies} new dependencies — security review required"
+  reason "adds new dependencies"
+  priority HIGH
+}
+
+// ─── Visible while checks run ────────────────────────────────────────────────
+
+// The base strict rule already blocks the verdict; this one is the visible
+// explanation, so nobody stares at a red check with no comment.
+rule "CI checks still running" {
+  for records where type == "pr"
+    and attr "pr.checks_pending" == true
+  do comment "pr" "Waiting for required checks to finish."
+  reason "checks pending"
+  priority LOW
+}
+
+// ─── AI review must not fail silently ────────────────────────────────────────
+
+// `unclear` and `error` are the two answers a reader has to see. Silence there
+// would let a unit nobody reviewed look like a unit that passed.
+rule "AI review was inconclusive" {
+  for records where type == "code_unit"
+    and attr "unit.llm_result" == "unclear"
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "The AI review could not decide on {attr.unit.name}; a human read is required"
+  reason "ai review inconclusive"
+  priority MEDIUM
+}
+
+rule "AI review failed" {
+  for records where type == "code_unit"
+    and attr "unit.llm_result" == "error"
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "The AI review failed on {attr.unit.name}; a human read is required"
+  reason "ai review failed"
+  priority MEDIUM
+}
+
+// ─── Decision model: risk ────────────────────────────────────────────────────
+
+enrich "cdm: how risky is this PR?" {
+  for records where type == "pr"
+  stale_after 1 hour
+  tool "cdm" "decide" {
+    state   concat(attr "pr.title", "\n\n", attr "pr.body", "\n\nChanged files:\n", join(attr "pr.changed_files", "\n"))
+    choices "low, medium, high"
+  }
+  update attr "pr.risk" from result.chosen
+  update attr "pr.risk_certainty" from result.certainty
+}
+
+// Gated at 0.85: below that the decision model is guessing, and a guess that
+// blocks is worse than no opinion.
+rule "Confident high risk needs a human review" {
+  for records where type == "pr"
+    and attr "pr.risk" == "high"
+    and attr "pr.risk_certainty" >= 0.85
+  block "merge"
+  do block "pr.merge"
+  do comment "pr" "The decision model rates this change high risk"
+  reason "high risk"
+  priority HIGH
+}
+
+// ─── Decision model: description quality ─────────────────────────────────────
+
+enrich "cdm: does the description say why?" {
+  for records where type == "pr"
+  stale_after 1 hour
+  tool "cdm" "decide" {
+    state   concat(attr "pr.title", "\n\n", attr "pr.body")
+    choices "explains why, says only what, vague"
+  }
+  update attr "pr.description_kind" from result.chosen
+  update attr "pr.description_certainty" from result.certainty
+}
+
+// Comment only: "what changed but not why" is worth saying, not worth
+// blocking a merge over.
+rule "Confident vague description gets a comment" {
+  for records where type == "pr"
+    and attr "pr.description_kind" == "vague"
+    and attr "pr.description_certainty" >= 0.85
+  do comment "pr" "The description says what changed but not why"
+  priority MEDIUM
+}

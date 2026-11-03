@@ -1,0 +1,34 @@
+# Publishes to rubygems.org on a v*.*.* tag through trusted publishing (OIDC):
+# no API key is stored here. Set it up once on rubygems.org under the gem's
+# "Trusted publishers": repository Talooner/talooner-qa-rails, workflow
+# release.yml, environment release.
+name: release
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - name: The tag matches the gem's version
+        run: |
+          version=$(ruby -Ilib -e 'require "talooner_qa/version"; print TaloonerQa::VERSION')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match TaloonerQa::VERSION $version"
+            exit 1
+          fi
+      - run: bundle exec rspec
+      - uses: rubygems/release-gem@v1

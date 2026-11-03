@@ -1,0 +1,12 @@
+# Which code units exist, and the guide each is reviewed against. Writing this
+# file is what makes the cluster send `code_unit` records, so the AI-review
+# rules in `rules.tln` have something to react to.
+#
+# Doc content is read from the base branch, so a PR cannot rewrite the guide it
+# is judged against.
+- path: app/controllers/talooner_qa/
+  kind: controller
+  doc_ref: docs/guides/hooks_controller.md
+- path: lib/talooner_qa/
+  kind: service
+  doc_ref: docs/guides/library.md

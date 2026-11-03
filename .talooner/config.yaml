@@ -1,0 +1,9 @@
+# Check names the `pr.tests_passing` / `pr.lint_passing` facts match against.
+# Both are `.github/workflows/ci.yml` job ids: `test` passes only when every
+# Ruby × Rails entry of `specs` passed, `lint` runs RuboCop and builds the gem.
+# A wrong name silently turns the gate off instead of failing.
+checks:
+  tests:
+    - test
+  lint:
+    - lint
