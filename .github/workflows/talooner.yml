@@ -14,9 +14,6 @@
 # Branch protection: require the talooner check, not the review job, to block
 # merges (a !talooner run's job never reports on the PR's commit).
 #
-# Advice mode is on: blocking verdicts exit 0 and write no REQUEST_CHANGES, so
-# nothing here can gate a merge yet. Delete TALOONER_ADVICE_MODE below to make
-# the rules blocking once the findings have proven trustworthy.
 name: talooner
 on:
   pull_request:
@@ -113,7 +110,6 @@ jobs:
           CDM_URL: ${{ vars.CDM_URL }}
           CDM_TOKEN: ${{ secrets.CDM_TOKEN }}
           CDM_MODEL: ${{ vars.CDM_MODEL }}
-          TALOONER_ADVICE_MODE: "1"
           TALOONER_CHECK_RUN_ID: ${{ job.check_run_id }}
           GITHUB_TOKEN: ${{ github.token }}
   # Resolving a review thread needs contents: write, which the Talooner image
