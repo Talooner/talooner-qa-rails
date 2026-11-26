@@ -33,5 +33,6 @@ on: SubQ Snap, `subq-snap-preview`, via `CDM_URL` / `CDM_TOKEN`.
 
 ## Notes
 
+- Advice mode on: blocking verdicts exit 0 and write no `REQUEST_CHANGES`.
 - `pr.tests_passing` / `pr.lint_passing` map to the `test` and `lint` jobs in
   `.github/workflows/ci.yml`.
